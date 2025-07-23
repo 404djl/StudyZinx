@@ -10,6 +10,8 @@ import (
 )
 
 type Connection struct {
+	TcpServer ziface.IServer
+
 	Conn *net.TCPConn
 
 	ConnID uint32
@@ -21,17 +23,22 @@ type Connection struct {
 	ExitBuffChan chan bool
 
 	msgChan chan []byte
+
+	msgBuffChan chan []byte
 }
 
-func NewConntion(conn *net.TCPConn, connID uint32, msgHandler ziface.IMsgHandle) *Connection {
+func NewConntion(server ziface.IServer, conn *net.TCPConn, connID uint32, msgHandler ziface.IMsgHandle) *Connection {
 	c := &Connection{
+		TcpServer:    server,
 		Conn:         conn,
 		ConnID:       connID,
 		isClosed:     false,
 		MsgHandler:   msgHandler,
 		ExitBuffChan: make(chan bool, 1),
 		msgChan:      make(chan []byte),
+		msgBuffChan:  make(chan []byte, utils.GlobalObject.MaxMsgChanLen),
 	}
+	c.TcpServer.GetConnMgr().Add(c)
 	return c
 }
 
@@ -50,6 +57,17 @@ func (c *Connection) StartWriter() {
 			if _, err := c.Conn.Write(data); err != nil {
 				fmt.Println("Send Data error:, ", err, " Conn Writer exit")
 				return
+			}
+		case data, ok := <-c.msgBuffChan:
+			if ok {
+				if _, err := c.Conn.Write(data); err != nil {
+					fmt.Println("Send Buff Data error: ", err, " Conn Writer exit")
+					return
+				}
+			} else {
+
+				fmt.Println("msgBuffChan is Closed")
+				break
 			}
 		case <-c.ExitBuffChan:
 			//conn已经关闭
@@ -70,7 +88,7 @@ func (c *Connection) StartReader() {
 		if _, err := io.ReadFull(c.GetTCPConnection(), headData); err != nil {
 			fmt.Println("read msg head error ", err)
 			c.ExitBuffChan <- true
-			continue
+			break
 		}
 
 		msg, err := dp.Unpack(headData)
@@ -111,6 +129,7 @@ func (c *Connection) Start() {
 	go c.StartReader()
 	go c.StartWriter()
 
+	c.TcpServer.CallOnConnStart(c)
 	for {
 		select {
 		case <-c.ExitBuffChan:
@@ -120,16 +139,23 @@ func (c *Connection) Start() {
 }
 
 func (c *Connection) Stop() {
+	fmt.Println("Conn Stop()... ConnID = ", c.ConnID)
+
 	if c.isClosed == true {
 		return
 	}
 	c.isClosed = true
 
+	c.TcpServer.CallOnConnStop(c)
+
 	c.Conn.Close()
 
 	c.ExitBuffChan <- true
 
+	c.TcpServer.GetConnMgr().Remove(c)
+
 	close(c.ExitBuffChan)
+	close(c.msgBuffChan)
 
 }
 
@@ -158,6 +184,23 @@ func (c *Connection) SendMsg(msgId uint32, data []byte) error {
 	}
 
 	c.msgChan <- msg
+
+	return nil
+}
+
+func (c *Connection) SendBuffMsg(msgId uint32, data []byte) error {
+	if c.isClosed == true {
+		return errors.New("Connection closed when send buff msg")
+	}
+
+	dp := NewDataPack()
+	msg, err := dp.Pack(NewMsgPackage(msgId, data))
+	if err != nil {
+		fmt.Println("Pack error msg id = ", msgId)
+		return errors.New("Pack error msg ")
+	}
+
+	c.msgBuffChan <- msg
 
 	return nil
 }
