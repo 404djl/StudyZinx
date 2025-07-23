@@ -18,6 +18,8 @@ type Connection struct {
 	MsgHandler ziface.IMsgHandle
 
 	ExitBuffChan chan bool
+
+	msgChan chan []byte
 }
 
 func NewConntion(conn *net.TCPConn, connID uint32, msgHandler ziface.IMsgHandle) *Connection {
@@ -27,8 +29,32 @@ func NewConntion(conn *net.TCPConn, connID uint32, msgHandler ziface.IMsgHandle)
 		isClosed:     false,
 		MsgHandler:   msgHandler,
 		ExitBuffChan: make(chan bool, 1),
+		msgChan:      make(chan []byte),
 	}
 	return c
+}
+
+/*
+写消息Goroutine， 用户将数据发送给客户端
+*/
+func (c *Connection) StartWriter() {
+
+	fmt.Println("[Writer Goroutine is running]")
+	defer fmt.Println(c.RemoteAddr().String(), "[conn Writer exit!]")
+
+	for {
+		select {
+		case data := <-c.msgChan:
+			//有数据要写给客户端
+			if _, err := c.Conn.Write(data); err != nil {
+				fmt.Println("Send Data error:, ", err, " Conn Writer exit")
+				return
+			}
+		case <-c.ExitBuffChan:
+			//conn已经关闭
+			return
+		}
+	}
 }
 
 func (c *Connection) StartReader() {
@@ -75,7 +101,9 @@ func (c *Connection) StartReader() {
 }
 
 func (c *Connection) Start() {
+
 	go c.StartReader()
+	go c.StartWriter()
 
 	for {
 		select {
@@ -123,11 +151,7 @@ func (c *Connection) SendMsg(msgId uint32, data []byte) error {
 		return errors.New("Pack error msg ")
 	}
 
-	if _, err := c.Conn.Write(msg); err != nil {
-		fmt.Println("Write msg id ", msgId, " error ")
-		c.ExitBuffChan <- true
-		return errors.New("conn write error")
-	}
+	c.msgChan <- msg
 
 	return nil
 }
